@@ -20,40 +20,75 @@ from data_cleaner import (
 
 load_dotenv()
 
-API_TOKEN = os.getenv("MONDAY_API_TOKEN")
-
 URL = "https://api.monday.com/v2"
 
 
 # ============================================================
-# API TOKEN CHECK
+# GET SECRET
 # ============================================================
 
-if not API_TOKEN:
-    raise ValueError(
-        "MONDAY_API_TOKEN not found in .env file"
-    )
+def get_secret(name, default=None):
+    """
+    Get secret from:
+    1. Environment variable
+    2. Streamlit secrets
+    3. Default value
+    """
+
+    # --------------------------------------------------------
+    # Local .env / environment
+    # --------------------------------------------------------
+
+    value = os.getenv(name)
+
+    if value:
+        return value.strip()
+
+
+    # --------------------------------------------------------
+    # Streamlit Cloud secrets
+    # --------------------------------------------------------
+
+    try:
+        import streamlit as st
+
+        if name in st.secrets:
+            value = st.secrets[name]
+
+            if value:
+                return str(value).strip()
+
+    except Exception:
+        pass
+
+
+    return default
 
 
 # ============================================================
-# DEALS BOARD ID
+# MONDAY CONFIGURATION
 # ============================================================
 
-DEALS_BOARD_ID = os.getenv(
-    "MONDAY_DEALS_BOARD_ID"
+API_TOKEN = get_secret("MONDAY_API_TOKEN")
+
+DEALS_BOARD_ID = get_secret(
+    "MONDAY_DEALS_BOARD_ID",
+    "5030965311"
 )
 
-if not DEALS_BOARD_ID:
-    raise ValueError(
-        "MONDAY_DEALS_BOARD_ID not found in .env file"
-    )
+
+# ============================================================
+# VALIDATE BOARD ID
+# ============================================================
 
 try:
+
     DEALS_BOARD_ID = int(DEALS_BOARD_ID)
 
-except ValueError:
+except (ValueError, TypeError):
+
     raise ValueError(
-        "MONDAY_DEALS_BOARD_ID must be a number"
+        "MONDAY_DEALS_BOARD_ID must be a number."
     )
 
 
@@ -61,10 +96,22 @@ except ValueError:
 # HEADERS
 # ============================================================
 
-HEADERS = {
-    "Authorization": API_TOKEN,
-    "Content-Type": "application/json"
-}
+def get_headers():
+
+    token = get_secret("MONDAY_API_TOKEN")
+
+    if not token:
+
+        raise ValueError(
+            "MONDAY_API_TOKEN is missing. "
+            "Add it to your .env file locally or "
+            "Streamlit Cloud → Settings → Secrets."
+        )
+
+    return {
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
 
 
 # ============================================================
@@ -72,13 +119,11 @@ HEADERS = {
 # ============================================================
 
 def fetch_all_deals(board_id=None):
+
     """
-    Fetch all items from the Monday.com Deals board.
+    Fetch all deals from Monday.com.
 
     Uses cursor-based pagination.
-
-    Returns:
-        list: Raw Monday.com deal items.
     """
 
     if board_id is None:
@@ -152,6 +197,7 @@ def fetch_all_deals(board_id=None):
             }}
             """
 
+
         # ====================================================
         # API REQUEST
         # ====================================================
@@ -160,10 +206,8 @@ def fetch_all_deals(board_id=None):
 
             response = requests.post(
                 URL,
-                json={
-                    "query": query
-                },
-                headers=HEADERS,
+                json={"query": query},
+                headers=get_headers(),
                 timeout=30
             )
 
@@ -171,15 +215,31 @@ def fetch_all_deals(board_id=None):
 
             result = response.json()
 
-        except requests.RequestException as e:
+        except requests.exceptions.Timeout:
 
-            print("\nMonday.com connection error:")
-            print(e)
+            print("Monday.com request timed out.")
 
             return []
 
+        except requests.exceptions.RequestException as e:
+
+            print(
+                f"Monday.com connection error: {e}"
+            )
+
+            return []
+
+        except ValueError:
+
+            print(
+                "Monday.com returned invalid JSON."
+            )
+
+            return []
+
+
         # ====================================================
-        # API ERROR
+        # GRAPHQL ERROR
         # ====================================================
 
         if "errors" in result:
@@ -187,9 +247,16 @@ def fetch_all_deals(board_id=None):
             print("\nMonday.com API Error:")
 
             for error in result["errors"]:
-                print(error)
+
+                print(
+                    error.get(
+                        "message",
+                        error
+                    )
+                )
 
             return []
+
 
         # ====================================================
         # GET PAGE
@@ -199,12 +266,17 @@ def fetch_all_deals(board_id=None):
 
             if cursor is None:
 
-                boards = result["data"]["boards"]
+                boards = (
+                    result
+                    .get("data", {})
+                    .get("boards", [])
+                )
 
                 if not boards:
 
                     print(
-                        f"\nNo board found with ID: {board_id}"
+                        f"No board found with ID: "
+                        f"{board_id}"
                     )
 
                     return []
@@ -212,14 +284,27 @@ def fetch_all_deals(board_id=None):
                 board = boards[0]
 
                 print(
-                    f"Deals Board: {board.get('name')}"
+                    f"Deals Board: "
+                    f"{board.get('name', 'Unknown')}"
                 )
 
                 page = board["items_page"]
 
             else:
 
-                page = result["data"]["next_items_page"]
+                page = (
+                    result
+                    .get("data", {})
+                    .get("next_items_page")
+                )
+
+                if not page:
+
+                    print(
+                        "No next page returned."
+                    )
+
+                    break
 
         except (
             KeyError,
@@ -228,7 +313,7 @@ def fetch_all_deals(board_id=None):
         ):
 
             print(
-                "\nUnexpected Monday.com API response:"
+                "\nUnexpected Monday.com response:"
             )
 
             print(
@@ -239,6 +324,7 @@ def fetch_all_deals(board_id=None):
             )
 
             return []
+
 
         # ====================================================
         # ADD ITEMS
@@ -255,21 +341,26 @@ def fetch_all_deals(board_id=None):
             f"Fetched {len(all_items)} deals..."
         )
 
+
         # ====================================================
         # NEXT CURSOR
         # ====================================================
 
         cursor = page.get("cursor")
 
+
         # ====================================================
-        # END
+        # STOP
         # ====================================================
 
         if not cursor:
+
             break
 
+
     print(
-        f"\nTotal raw deals fetched: {len(all_items)}"
+        f"\nTotal raw deals fetched: "
+        f"{len(all_items)}"
     )
 
     return all_items
@@ -280,36 +371,44 @@ def fetch_all_deals(board_id=None):
 # ============================================================
 
 def get_column_value(column):
+
     """
-    Extract the best available value from a Monday.com column.
-
-    Priority:
-
-        1. text
-        2. parsed JSON value
-        3. raw value
+    Extract the best available value
+    from a Monday.com column.
     """
 
     text = column.get("text")
     value = column.get("value")
+    column_type = column.get("type")
 
-    # ========================================================
-    # TEXT VALUE
-    # ========================================================
 
-    if text is not None and str(text).strip() != "":
+    # --------------------------------------------------------
+    # TEXT
+    # --------------------------------------------------------
+
+    if (
+        text is not None
+        and str(text).strip() != ""
+    ):
+
         return text
 
-    # ========================================================
-    # NO VALUE
-    # ========================================================
 
-    if value is None or value == "":
+    # --------------------------------------------------------
+    # EMPTY
+    # --------------------------------------------------------
+
+    if (
+        value is None
+        or value == ""
+    ):
+
         return ""
 
-    # ========================================================
-    # TRY JSON
-    # ========================================================
+
+    # --------------------------------------------------------
+    # JSON
+    # --------------------------------------------------------
 
     try:
 
@@ -322,33 +421,41 @@ def get_column_value(column):
 
         return value
 
-    # ========================================================
-    # JSON DICTIONARY
-    # ========================================================
+
+    # --------------------------------------------------------
+    # DICTIONARY
+    # --------------------------------------------------------
 
     if isinstance(parsed, dict):
 
+        # Number
         if "number" in parsed:
             return parsed["number"]
 
+        # Amount
         if "amount" in parsed:
             return parsed["amount"]
 
+        # Date
         if "date" in parsed:
             return parsed["date"]
 
+        # Value
         if "value" in parsed:
             return parsed["value"]
 
+        # Label
         if "label" in parsed:
             return parsed["label"]
 
+        # Percent
         if "percent" in parsed:
             return parsed["percent"]
 
-    # ========================================================
-    # JSON LIST
-    # ========================================================
+
+    # --------------------------------------------------------
+    # LIST
+    # --------------------------------------------------------
 
     if isinstance(parsed, list):
 
@@ -357,9 +464,10 @@ def get_column_value(column):
             for x in parsed
         )
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # FALLBACK
-    # ========================================================
+    # --------------------------------------------------------
 
     return parsed
 
@@ -369,16 +477,19 @@ def get_column_value(column):
 # ============================================================
 
 def to_number(value):
+
     """
-    Convert Monday.com numeric/currency values to float.
+    Convert Monday.com number/currency values to float.
     """
 
     if value is None:
+
         return 0.0
 
-    # ========================================================
-    # NUMERIC
-    # ========================================================
+
+    # --------------------------------------------------------
+    # NUMBER
+    # --------------------------------------------------------
 
     if isinstance(
         value,
@@ -388,25 +499,31 @@ def to_number(value):
         try:
 
             if pd.isna(value):
+
                 return 0.0
 
         except Exception:
+
             pass
 
         return float(value)
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # STRING
-    # ========================================================
+    # --------------------------------------------------------
 
     value = str(value).strip()
 
+
     if value == "":
+
         return 0.0
 
-    # ========================================================
-    # REMOVE FORMATTING
-    # ========================================================
+
+    # --------------------------------------------------------
+    # CLEAN FORMATTING
+    # --------------------------------------------------------
 
     value = (
         value
@@ -419,15 +536,19 @@ def to_number(value):
         .strip()
     )
 
-    # ========================================================
+
+    # --------------------------------------------------------
     # CONVERT
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
 
         return float(value)
 
-    except ValueError:
+    except (
+        ValueError,
+        TypeError
+    ):
 
         return 0.0
 
@@ -437,8 +558,9 @@ def to_number(value):
 # ============================================================
 
 def get_deals():
+
     """
-    Fetch, clean and prepare Deals data.
+    Fetch and clean Deals data.
 
     Returns:
         pandas.DataFrame
@@ -452,13 +574,15 @@ def get_deals():
         f"Deals Board ID: {DEALS_BOARD_ID}"
     )
 
+
     # ========================================================
-    # FETCH RAW DATA
+    # FETCH
     # ========================================================
 
     items = fetch_all_deals(
         DEALS_BOARD_ID
     )
+
 
     if not items:
 
@@ -468,11 +592,13 @@ def get_deals():
 
         return pd.DataFrame()
 
+
     # ========================================================
     # CREATE ROWS
     # ========================================================
 
     rows = []
+
 
     for item in items:
 
@@ -483,9 +609,6 @@ def get_deals():
             )
         }
 
-        # ====================================================
-        # COLUMN VALUES
-        # ====================================================
 
         for column in item.get(
             "column_values",
@@ -496,11 +619,9 @@ def get_deals():
                 "id"
             )
 
-            if not column_id:
-                continue
 
             # ------------------------------------------------
-            # MAP COLUMN ID
+            # MAP COLUMN
             # ------------------------------------------------
 
             column_name = (
@@ -510,8 +631,9 @@ def get_deals():
                 )
             )
 
+
             # ------------------------------------------------
-            # EXTRACT VALUE
+            # VALUE
             # ------------------------------------------------
 
             row[column_name] = (
@@ -520,7 +642,9 @@ def get_deals():
                 )
             )
 
+
         rows.append(row)
+
 
     # ========================================================
     # DATAFRAME
@@ -528,11 +652,13 @@ def get_deals():
 
     df = pd.DataFrame(rows)
 
+
     # ========================================================
-    # CLEAN DATAFRAME
+    # CLEAN DATA
     # ========================================================
 
     df = clean_dataframe(df)
+
 
     # ========================================================
     # DEAL VALUE
@@ -549,6 +675,7 @@ def get_deals():
 
         df["Deal Value"] = 0.0
 
+
     # ========================================================
     # CLOSE PROBABILITY
     # ========================================================
@@ -564,23 +691,9 @@ def get_deals():
 
         df["Close Probability"] = 0.0
 
+
     # ========================================================
-    # FORECAST VALUE
-    # ========================================================
-    #
-    # IMPORTANT:
-    #
-    # Monday.com's formula column
-    # "deal_forecast_value"
-    # is returning EMPTY.
-    #
-    # Therefore we calculate Forecast Value ourselves.
-    #
-    # Formula:
-    #
-    # Forecast Value =
-    # Deal Value × Close Probability / 100
-    #
+    # CALCULATED FORECAST
     # ========================================================
 
     df["Calculated Forecast Value"] = (
@@ -589,18 +702,6 @@ def get_deals():
         / 100.0
     )
 
-    # ========================================================
-    # FORECAST VALUE
-    # ========================================================
-    #
-    # Keep a standard "Forecast Value" column
-    # for BI engine compatibility.
-    #
-    # ========================================================
-
-    df["Forecast Value"] = (
-        df["Calculated Forecast Value"]
-    )
 
     # ========================================================
     # SECTOR
@@ -613,9 +714,6 @@ def get_deals():
             .apply(normalize_sector)
         )
 
-    else:
-
-        df["Sector"] = "Unknown"
 
     # ========================================================
     # DATES
@@ -633,6 +731,7 @@ def get_deals():
         date_columns
     )
 
+
     # ========================================================
     # DEBUG
     # ========================================================
@@ -640,6 +739,7 @@ def get_deals():
     print(
         "\n===== NON-ZERO DEALS ====="
     )
+
 
     debug_columns = [
         "Deal Name",
@@ -650,15 +750,18 @@ def get_deals():
         "Sector"
     ]
 
+
     existing_columns = [
         column
         for column in debug_columns
         if column in df.columns
     ]
 
+
     non_zero_deals = df[
         df["Deal Value"] > 0
     ]
+
 
     if not non_zero_deals.empty:
 
@@ -676,14 +779,15 @@ def get_deals():
             "No non-zero deal values found."
         )
 
+
     # ========================================================
-    # DEAL VALUE TOTAL
+    # TOTAL DEAL VALUE
     # ========================================================
 
     total_deal_value = (
-        df["Deal Value"]
-        .sum()
+        df["Deal Value"].sum()
     )
+
 
     print(
         "\n===== DEAL VALUE TOTAL ====="
@@ -703,14 +807,17 @@ def get_deals():
         )
     )
 
+
     # ========================================================
-    # FORECAST VALUE TOTAL
+    # TOTAL FORECAST
     # ========================================================
 
     total_forecast_value = (
-        df["Calculated Forecast Value"]
-        .sum()
+        df[
+            "Calculated Forecast Value"
+        ].sum()
     )
+
 
     print(
         "\n===== FORECAST VALUE TOTAL ====="
@@ -725,14 +832,13 @@ def get_deals():
         "Non-zero Forecast Values:",
         int(
             (
-                df["Calculated Forecast Value"] > 0
+                df[
+                    "Calculated Forecast Value"
+                ] > 0
             ).sum()
         )
     )
 
-    # ========================================================
-    # FINAL RETURN
-    # ========================================================
 
     return df
 
@@ -743,69 +849,81 @@ def get_deals():
 
 if __name__ == "__main__":
 
-    df = get_deals()
+    try:
 
-    print(
-        "\n===== DEALS DATA ====="
-    )
+        df = get_deals()
 
-    print(
-        "Number of records:",
-        len(df)
-    )
-
-    print(
-        "Number of columns:",
-        len(df.columns)
-    )
-
-    print(
-        "\nColumn names:"
-    )
-
-    print(
-        df.columns.tolist()
-    )
-
-    print(
-        "\nFirst 5 records:"
-    )
-
-    print(
-        df.head()
-    )
-
-    # ========================================================
-    # FINAL DEAL VALUE CHECK
-    # ========================================================
-
-    if not df.empty:
 
         print(
-            "\n===== FINAL DEAL VALUE CHECK ====="
+            "\n===== DEALS DATA ====="
         )
 
-        check_columns = [
-            "Deal Name",
-            "Deal Value",
-            "Close Probability",
-            "Forecast Value",
-            "Calculated Forecast Value",
-            "Sector"
-        ]
-
-        existing_columns = [
-            column
-            for column in check_columns
-            if column in df.columns
-        ]
+        print(
+            "Number of records:",
+            len(df)
+        )
 
         print(
-            df[
-                existing_columns
-            ]
-            .head(20)
-            .to_string(
-                index=False
+            "Number of columns:",
+            len(df.columns)
+        )
+
+
+        print(
+            "\nColumn names:"
+        )
+
+        print(
+            df.columns.tolist()
+        )
+
+
+        print(
+            "\nFirst 5 records:"
+        )
+
+        print(
+            df.head()
+        )
+
+
+        if not df.empty:
+
+            print(
+                "\n===== FINAL DEAL VALUE CHECK ====="
             )
+
+
+            check_columns = [
+                "Deal Name",
+                "Deal Value",
+                "Close Probability",
+                "Calculated Forecast Value",
+                "Sector"
+            ]
+
+
+            existing_columns = [
+                column
+                for column in check_columns
+                if column in df.columns
+            ]
+
+
+            print(
+                df[
+                    existing_columns
+                ]
+                .head(20)
+                .to_string(
+                    index=False
+                )
+            )
+
+    except Exception as e:
+
+        print(
+            "\nERROR:"
         )
+
+        print(e)
